@@ -48,15 +48,20 @@ string dummystring("abcdef");
 
 static constexpr openlcb::ConfigDef cfg(0);
 
-// ---- Fixed output GPIOs -------------------------------------------------------
-// Channel N is hard-wired to OUTPUT_PINS[N] — the 13 usable GPIOs on a
-// WROVER-class ESP32. GPIO2 is the WiFi-status LED (not an LCC output); GPIO4/5
-// are the CAN transceiver. Order = channel order shown in JMRI (Output 1..13).
+// ---- Selectable output GPIOs --------------------------------------------------
+// Each channel picks its GPIO from a CDI dropdown (see OUTPUT_PIN_MAP in config.h).
+// The stored value is the <property> index; this array maps index -> GPIO, with
+// index 0 = None (channel disabled). KEEP IN SYNC with OUTPUT_PIN_MAP.
+// The 13 usable GPIOs on a WROVER-class ESP32: GPIO2 is the WiFi-status LED (not
+// an LCC output); GPIO4/5 are the CAN transceiver. A channel's *natural* GPIO
+// (its factory-reset default) is OUTPUT_PINS[i+1] for channel i.
+static constexpr int PIN_NONE = -1;
 static constexpr int OUTPUT_PINS[] = {
-    13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
+    PIN_NONE, 13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
 };
-static_assert(ARRAYSIZE(OUTPUT_PINS) == openlcb::NUM_OUTPUTS,
-              "OUTPUT_PINS must have one GPIO per output channel");
+static_assert(ARRAYSIZE(OUTPUT_PINS) == openlcb::NUM_OUTPUTS + 1 &&
+              OUTPUT_PINS[0] == PIN_NONE,
+              "OUTPUT_PINS must be None + one GPIO per output channel");
 
 // ---- Effect ids (KEEP IN SYNC with EFFECT_MAP in config.h) --------------------
 enum : uint8_t { EFF_OFF = 0, EFF_STEADY = 1, EFF_RANDOM = 2, EFF_FLICKER = 3 };
@@ -93,16 +98,23 @@ static void free_ledc(int ch)
     if (ch >= 0 && ch < 16) s_ledc_used[ch] = false;
 }
 
+// ponytail: no cross-channel pin arbitration. Two channels may select the same
+// GPIO; there's no ownership check. Behaviour is "last apply wins" for the pin
+// mode/LEDC, and every commanded channel drives its pin (last effect tick wins).
+// It never crashes. Add a claimed-pin bitmap here if arbitration is ever needed.
+
 /// One output channel: a config-driven consumer whose on/off events set a
-/// commanded state; a non-blocking effect engine (update()) drives the GPIO.
-/// Mirrors node #1's GPIOBit+BitEventConsumer pattern, but the Gpio it feeds is
-/// a CmdGpio that toggles commanded_ instead of writing the pin.
+/// commanded state; a non-blocking effect engine (update()) drives the SELECTED
+/// GPIO. Mirrors node #1's GPIOBit+BitEventConsumer + DynamicGpio retarget, but
+/// the Gpio it feeds is a CmdGpio that toggles commanded_ instead of writing the
+/// pin — the effect engine does the physical writes on the loop thread.
 class OutputChannel : public DefaultConfigUpdateListener
 {
 public:
-    OutputChannel(openlcb::Node *node, const openlcb::OutputConfig &cfg, int pin)
+    OutputChannel(openlcb::Node *node, const openlcb::OutputConfig &cfg,
+                  uint8_t default_pin_idx)
         : node_(node)
-        , pin_(pin)
+        , default_pin_idx_(default_pin_idx)
         , gpio_(this)
         , impl_(node, 0, 0, &gpio_)
         , consumer_(&impl_)
@@ -114,7 +126,9 @@ public:
                                      BarrierNotifiable *done) override
     {
         AutoNotify n(done);
-        set_effect(cfg_.effect().read(fd));   // (re)configure pin / LEDC channel
+        uint8_t idx = cfg_.pin().read(fd);
+        int new_pin = (idx < ARRAYSIZE(OUTPUT_PINS)) ? OUTPUT_PINS[idx] : PIN_NONE;
+        retarget(new_pin, cfg_.effect().read(fd));   // (re)select pin + effect/LEDC
 
         openlcb::EventId on = cfg_.event_on().read(fd);
         openlcb::EventId off = cfg_.event_off().read(fd);
@@ -130,17 +144,16 @@ public:
 
     void factory_reset(int fd) override
     {
-        char d[16];
-        snprintf(d, sizeof d, "GPIO%d", pin_);   // fresh tab reads "Output N (GPIOxx)"
-        cfg_.description().write(fd, d);
-        CDI_FACTORY_RESET(cfg_.effect);   // Off
+        cfg_.pin().write(fd, default_pin_idx_);   // this channel's natural GPIO
+        cfg_.description().write(fd, "");          // pin is visible in its own field
+        CDI_FACTORY_RESET(cfg_.effect);           // Off
     }
 
     /// Non-blocking effect tick (called from loop() every ~TICK_MS). All hardware
     /// writes for the effects happen HERE (loop thread), never from the executor.
     void update(uint32_t now)
     {
-        if (!commanded_)
+        if (pin_ < 0 || !commanded_)   // None-selected channel never drives
         {
             if (active_) { force_off(); active_ = false; }
             return;
@@ -207,11 +220,35 @@ private:
         OutputChannel *owner_;
     };
 
+    /// Retarget this channel to a (possibly new) GPIO and apply its effect. On a
+    /// pin change we release the OLD pin cleanly first (free its LEDC / drive LOW),
+    /// then set_effect() sets up the new pin — node #1's DynamicGpio::configure
+    /// retarget, extended for the LEDC-backed Flicker effect.
+    void retarget(int new_pin, uint8_t eff)
+    {
+        if (new_pin != pin_)
+        {
+            if (ledc_ch_ >= 0)
+            {
+                if (pin_ >= 0) ledcDetachPin(pin_);
+                free_ledc(ledc_ch_);
+                ledc_ch_ = -1;
+            }
+            else if (pin_ >= 0)
+            {
+                digitalWrite(pin_, LOW);
+            }
+            pin_ = new_pin;
+        }
+        set_effect(eff);
+    }
+
     /// Apply an effect selection: allocate/tear down the LEDC channel and set the
-    /// pin mode. Called from apply_configuration() (config-save is rare).
+    /// pin mode. Called from retarget() (config-save is rare). A None pin
+    /// (pin_ < 0) touches no hardware — the channel is disabled.
     void set_effect(uint8_t eff)
     {
-        if (eff == EFF_FLICKER && ledc_ch_ < 0)
+        if (pin_ >= 0 && eff == EFF_FLICKER && ledc_ch_ < 0)
         {
             ledc_ch_ = alloc_ledc();
             if (ledc_ch_ >= 0)
@@ -223,11 +260,11 @@ private:
         }
         else if (eff != EFF_FLICKER && ledc_ch_ >= 0)
         {
-            ledcDetachPin(pin_);
+            if (pin_ >= 0) ledcDetachPin(pin_);
             free_ledc(ledc_ch_);
             ledc_ch_ = -1;
         }
-        if (eff != EFF_FLICKER)
+        if (pin_ >= 0 && eff != EFF_FLICKER)
         {
             pinMode(pin_, OUTPUT);
             digitalWrite(pin_, LOW);
@@ -242,16 +279,18 @@ private:
     void force_off()
     {
         on_ = false;
-        if (ledc_ch_ >= 0) ledcWrite(ledc_ch_, 0);
-        else               digitalWrite(pin_, LOW);
+        if (ledc_ch_ >= 0)     ledcWrite(ledc_ch_, 0);
+        else if (pin_ >= 0)    digitalWrite(pin_, LOW);
     }
 
     openlcb::Node *node_;
-    const int pin_;
+    const uint8_t default_pin_idx_;     // natural-GPIO property index (factory reset)
     CmdGpio gpio_;
     openlcb::GPIOBit impl_;
     openlcb::BitEventConsumer consumer_;
     const openlcb::OutputConfig cfg_;
+
+    int      pin_      = PIN_NONE;       // currently selected GPIO (-1 = None)
 
     // Effect runtime state. commanded_/restart_ are written from the executor
     // (event handler) and read on loop(); everything else is loop-only. The
@@ -269,8 +308,10 @@ private:
     uint32_t next_flicker_ = 0;         // Flicker next update time (ms)
 };
 
+// Channel i's factory-reset default is property index i+1 (OUTPUT_PINS[i+1] is its
+// natural GPIO; index 0 = None).
 #define OUT_CH(i) \
-    OutputChannel(openmrn.stack()->node(), cfg.seg().outputs().entry<i>(), OUTPUT_PINS[i])
+    OutputChannel(openmrn.stack()->node(), cfg.seg().outputs().entry<i>(), (i) + 1)
 OutputChannel output_channels[] = {
     OUT_CH(0),  OUT_CH(1),  OUT_CH(2),  OUT_CH(3),  OUT_CH(4),
     OUT_CH(5),  OUT_CH(6),  OUT_CH(7),  OUT_CH(8),  OUT_CH(9),

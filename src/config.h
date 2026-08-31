@@ -7,7 +7,7 @@
 //
 // Each output channel carries:
 //   - a PIN dropdown (which board GPIO this channel drives; None = disabled,
-//     defaulted at factory reset to the channel's natural GPIO),
+//     defaulted at factory reset to None so unconfigured tabs own no pin),
 //   - a 16-char user Description,
 //   - an EFFECT dropdown (0=Off, 1=Steady, 2=Random, 3=Flicker),
 //   - an on/off event pair.
@@ -43,7 +43,10 @@ constexpr uint8_t NUM_OUTPUTS = 13;   // consumers, fixed 1:1 to GPIOs
 /// 0x1821 = 16-char desc + individually-named per-GPIO groups.
 /// 0x1822 = 16-char desc, back to RepeatedGroup (JMRI tabbed display).
 /// 0x1823 = added per-output pin dropdown (selectable GPIO inside each tab).
-static constexpr uint16_t CANONICAL_VERSION = 0x1823;
+/// 0x1824 = factory-reset seeds pin = None (was each channel's natural GPIO), so
+///          unconfigured tabs own no pin and can't collide. Bump reformats
+///          existing nodes to the clean all-None state on next boot.
+static constexpr uint16_t CANONICAL_VERSION = 0x1824;
 
 // ---- Pin-selector dropdown (stored value = <property> index; label = GPIO) --
 // The firmware maps these property indices to GPIOs via OUTPUT_PINS[] in
@@ -78,7 +81,7 @@ CDI_GROUP(OutputConfig);
 CDI_GROUP_ENTRY(pin, Uint8ConfigEntry, Default(0), //
     Name("Output GPIO"),
     Description("Which board GPIO this channel drives. None = disabled. "
-                "Defaults to this channel's natural GPIO."),
+                "Defaults to None; pick a GPIO to enable this channel."),
     MapValues(OUTPUT_PIN_MAP));
 CDI_GROUP_ENTRY(description, StringConfigEntry<16>, //
     Name("Description"),

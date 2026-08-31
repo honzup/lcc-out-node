@@ -53,8 +53,9 @@ static constexpr openlcb::ConfigDef cfg(0);
 // The stored value is the <property> index; this array maps index -> GPIO, with
 // index 0 = None (channel disabled). KEEP IN SYNC with OUTPUT_PIN_MAP.
 // The 13 usable GPIOs on a WROVER-class ESP32: GPIO2 is the WiFi-status LED (not
-// an LCC output); GPIO4/5 are the CAN transceiver. A channel's *natural* GPIO
-// (its factory-reset default) is OUTPUT_PINS[i+1] for channel i.
+// an LCC output); GPIO4/5 are the CAN transceiver. OUTPUT_PINS[idx] maps a stored
+// dropdown index to its GPIO; every channel factory-resets to None (index 0) and
+// the user assigns a GPIO per channel (no auto natural-GPIO default).
 static constexpr int PIN_NONE = -1;
 static constexpr int OUTPUT_PINS[] = {
     PIN_NONE, 13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
@@ -111,10 +112,8 @@ static void free_ledc(int ch)
 class OutputChannel : public DefaultConfigUpdateListener
 {
 public:
-    OutputChannel(openlcb::Node *node, const openlcb::OutputConfig &cfg,
-                  uint8_t default_pin_idx)
+    OutputChannel(openlcb::Node *node, const openlcb::OutputConfig &cfg)
         : node_(node)
-        , default_pin_idx_(default_pin_idx)
         , gpio_(this)
         , impl_(node, 0, 0, &gpio_)
         , consumer_(&impl_)
@@ -144,7 +143,10 @@ public:
 
     void factory_reset(int fd) override
     {
-        cfg_.pin().write(fd, default_pin_idx_);   // this channel's natural GPIO
+        // Seed pin = index 0 (None): an unconfigured tab claims NO GPIO, so it
+        // can't collide with another tab that later points at the same pin. The
+        // user picks the GPIO explicitly per channel.
+        cfg_.pin().write(fd, 0);                   // None — no pin owned until configured
         cfg_.description().write(fd, "");          // pin is visible in its own field
         CDI_FACTORY_RESET(cfg_.effect);           // Off
     }
@@ -196,6 +198,18 @@ public:
         default:   // EFF_OFF — disabled; hold LOW
             break;
         }
+    }
+
+    /// Recover this channel's state from the bus after boot: emit an Identify
+    /// Producers query so the ProducerIdentified(Valid/Invalid) reply flows back
+    /// through consumer_ -> GPIOBit::set_state -> CmdGpio -> commanded_, setting
+    /// the output deterministically — independent of the consumer-migration boot
+    /// race that can silently drop a live ON report. No-op for an unconfigured
+    /// (0/0) channel. Asynchronous: `done` fires once the query is enqueued.
+    void query_state(openlcb::WriteHelper *w, BarrierNotifiable *done)
+    {
+        if (impl_.event_on() == 0 && impl_.event_off() == 0) { done->notify(); return; }
+        consumer_.SendQuery(w, done);   // emits MTI_PRODUCER_IDENTIFY for event_on
     }
 
 private:
@@ -284,7 +298,6 @@ private:
     }
 
     openlcb::Node *node_;
-    const uint8_t default_pin_idx_;     // natural-GPIO property index (factory reset)
     CmdGpio gpio_;
     openlcb::GPIOBit impl_;
     openlcb::BitEventConsumer consumer_;
@@ -308,10 +321,10 @@ private:
     uint32_t next_flicker_ = 0;         // Flicker next update time (ms)
 };
 
-// Channel i's factory-reset default is property index i+1 (OUTPUT_PINS[i+1] is its
-// natural GPIO; index 0 = None).
+// Every channel factory-resets to pin = None (index 0); the user assigns a GPIO
+// per channel, so no two tabs silently own the same pin (see factory_reset).
 #define OUT_CH(i) \
-    OutputChannel(openmrn.stack()->node(), cfg.seg().outputs().entry<i>(), (i) + 1)
+    OutputChannel(openmrn.stack()->node(), cfg.seg().outputs().entry<i>())
 OutputChannel output_channels[] = {
     OUT_CH(0),  OUT_CH(1),  OUT_CH(2),  OUT_CH(3),  OUT_CH(4),
     OUT_CH(5),  OUT_CH(6),  OUT_CH(7),  OUT_CH(8),  OUT_CH(9),
@@ -526,8 +539,43 @@ void setup()
 
 static uint32_t s_last_tick = 0;
 
+// ---- One-shot producer-state recovery sweep ----------------------------------
+// After the node initialises, query each configured channel's producer once so
+// the ProducerIdentified reply sets commanded_ deterministically (see
+// OutputChannel::query_state). SendQuery is async and a single WriteHelper can't
+// be reused concurrently, so the channels are serialised: fire channel i+1 only
+// after channel i's query is enqueued. s_query_done (executor ctx) clears the
+// busy flag; loop() advances the index.
+// ponytail: linear index + busy flag in loop(), one shared WriteHelper — no
+// StateFlow. Ceiling: strictly one-at-a-time; upgrade to a StateFlow only if the
+// sweep ever needs to overlap other outbound traffic. Runs exactly once per boot
+// (index parks at -1); safe if is_initialized() flaps.
+static openlcb::WriteHelper s_query_wh;
+static BarrierNotifiable     s_query_bn;              // wraps s_query_done per query
+static volatile bool         s_query_busy = false;    // query in flight (set/cleared cross-thread)
+static int                   s_query_idx  = 0;        // next channel; -1 once swept
+static struct QueryDone : public Notifiable {
+    void notify() override { s_query_busy = false; }
+} s_query_done;
+
 void loop()
 {
+    // Producer-state recovery: one query per configured channel, serialised.
+    if (s_query_idx >= 0 && !s_query_busy &&
+        openmrn.stack()->node()->is_initialized())
+    {
+        if (s_query_idx >= (int)ARRAYSIZE(output_channels))
+        {
+            s_query_idx = -1;   // sweep complete — never run again this boot
+        }
+        else
+        {
+            s_query_busy = true;   // cleared by s_query_done when the query lands
+            output_channels[s_query_idx++].query_state(
+                &s_query_wh, s_query_bn.reset(&s_query_done));
+        }
+    }
+
     if (s_wifi_desired && !s_wifi_up)       { s_wifi_up = true;  enable_wifi(); }
     else if (!s_wifi_desired && s_wifi_up)  { s_wifi_up = false; disable_wifi(); }
     if (s_ota_ready) ArduinoOTA.handle();
@@ -552,6 +600,18 @@ void loop()
         uint32_t armed = s_cfg_dirty_ms;
         if (s_cfg_fd >= 0) fsync(s_cfg_fd);
         // Clear only if no write landed during the fsync; else re-sync next pass.
-        if (s_cfg_dirty_ms == armed) s_cfg_dirty = false;
+        if (s_cfg_dirty_ms == armed)
+        {
+            s_cfg_dirty = false;
+            // Config now committed to flash -> re-apply it LIVE so effect/pin
+            // edits take immediately instead of only at next boot. This schedules
+            // the apply pass on the OpenMRN executor: each listener's
+            // apply_configuration(initial_load=false). Same entry point
+            // MemoryConfigHandler fires on COMMAND_UPDATE_COMPLETE
+            // (OpenMRNLite MemoryConfig.hxx). Never call apply_configuration from
+            // loop() directly — it re-registers consumers via placement-new.
+            // Fire once per settle (fsync first, then trigger reads committed data).
+            ConfigUpdateService::instance()->trigger_update();
+        }
     }
 }

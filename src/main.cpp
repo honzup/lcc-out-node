@@ -539,34 +539,54 @@ void setup()
 
 static uint32_t s_last_tick = 0;
 
-// ---- One-shot producer-state recovery sweep ----------------------------------
-// After the node initialises, query each configured channel's producer once so
-// the ProducerIdentified reply sets commanded_ deterministically (see
+// ---- Producer-state recovery sweep (bounded retry) ----------------------------
+// After the node initialises, query each configured channel's producer so the
+// ProducerIdentified reply sets commanded_ deterministically (see
 // OutputChannel::query_state). SendQuery is async and a single WriteHelper can't
 // be reused concurrently, so the channels are serialised: fire channel i+1 only
 // after channel i's query is enqueued. s_query_done (executor ctx) clears the
 // busy flag; loop() advances the index.
-// ponytail: linear index + busy flag in loop(), one shared WriteHelper — no
-// StateFlow. Ceiling: strictly one-at-a-time; upgrade to a StateFlow only if the
-// sweep ever needs to overlap other outbound traffic. Runs exactly once per boot
-// (index parks at -1); safe if is_initialized() flaps.
+//
+// ProducerIdentified replies are best-effort — on any given boot JMRI may not
+// answer one channel in time, leaving that output dark until toggled. So the
+// whole sweep runs QUERY_PASSES times, each starting QUERY_RETRY_GAP_MS after
+// the previous one finishes; a reply missed on one pass is picked up on a later
+// one. Re-querying a channel that already recovered is idempotent (the reply
+// just re-confirms the same commanded state), so a full re-sweep is safe.
+// ponytail: bounded boot-time retry, NOT a periodic poll — parks permanently
+// after QUERY_PASSES so it never floods the bus. Linear index + busy flag +
+// pass counter in loop(), one shared WriteHelper — no StateFlow. Ceiling:
+// strictly one query in flight, passes never overlap; upgrade to a StateFlow
+// only if the sweep ever needs to overlap other outbound traffic.
+static constexpr int      QUERY_PASSES       = 3;      // total recovery sweeps per boot
+static constexpr uint32_t QUERY_RETRY_GAP_MS = 3000;   // gap after a sweep before the next
 static openlcb::WriteHelper s_query_wh;
 static BarrierNotifiable     s_query_bn;              // wraps s_query_done per query
 static volatile bool         s_query_busy = false;    // query in flight (set/cleared cross-thread)
-static int                   s_query_idx  = 0;        // next channel; -1 once swept
+static int                   s_query_idx  = 0;        // next channel; -1 between/after passes
+static int                   s_query_pass = 0;        // sweeps completed; stops at QUERY_PASSES
+static uint32_t              s_query_next_pass_ms = 0; // earliest start of the next sweep
 static struct QueryDone : public Notifiable {
     void notify() override { s_query_busy = false; }
 } s_query_done;
 
 void loop()
 {
-    // Producer-state recovery: one query per configured channel, serialised.
-    if (s_query_idx >= 0 && !s_query_busy &&
+    // Producer-state recovery: one query per configured channel, serialised,
+    // repeated for QUERY_PASSES bounded passes (see block comment above).
+    if (s_query_pass < QUERY_PASSES && !s_query_busy &&
         openmrn.stack()->node()->is_initialized())
     {
-        if (s_query_idx >= (int)ARRAYSIZE(output_channels))
+        if (s_query_idx < 0)   // between passes — wait out the retry gap, then re-arm
         {
-            s_query_idx = -1;   // sweep complete — never run again this boot
+            if ((int32_t)(millis() - s_query_next_pass_ms) >= 0) s_query_idx = 0;
+        }
+        else if (s_query_idx >= (int)ARRAYSIZE(output_channels))
+        {
+            // one full sweep done — schedule the next pass, or park after the last.
+            s_query_idx = -1;
+            s_query_next_pass_ms = millis() + QUERY_RETRY_GAP_MS;
+            ++s_query_pass;
         }
         else
         {

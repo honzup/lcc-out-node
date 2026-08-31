@@ -130,7 +130,9 @@ public:
 
     void factory_reset(int fd) override
     {
-        cfg_.description().write(fd, "");   // GPIO is in the JMRI label; keep desc blank
+        char d[16];
+        snprintf(d, sizeof d, "GPIO%d", pin_);   // fresh tab reads "Output N (GPIOxx)"
+        cfg_.description().write(fd, d);
         CDI_FACTORY_RESET(cfg_.effect);   // Off
     }
 
@@ -268,7 +270,7 @@ private:
 };
 
 #define OUT_CH(i) \
-    OutputChannel(openmrn.stack()->node(), cfg.seg().output##i(), OUTPUT_PINS[i])
+    OutputChannel(openmrn.stack()->node(), cfg.seg().outputs().entry<i>(), OUTPUT_PINS[i])
 OutputChannel output_channels[] = {
     OUT_CH(0),  OUT_CH(1),  OUT_CH(2),  OUT_CH(3),  OUT_CH(4),
     OUT_CH(5),  OUT_CH(6),  OUT_CH(7),  OUT_CH(8),  OUT_CH(9),

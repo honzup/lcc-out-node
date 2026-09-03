@@ -25,14 +25,24 @@
 #include <unistd.h>        // fsync — config persistence to flash
 #include <WiFiManager.h>   // tzapu — WiFi provisioning for OTA (not for LCC)
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>       // advertise lcc-out-node.local so OTA works by name
 
 #include <OpenMRNLite.h>
 #include "openlcb/ConfiguredConsumer.hxx"
 #include "openlcb/CallbackEventHandler.hxx"
+#include "utils/constants.hxx"                 // OVERRIDE_CONST — deepen CAN RX buffer
 
 #define USE_CAN   // CAN-only node for LCC (WiFi is OTA-only, event-gated)
 
 #include "config.h"
+
+// Deepen the CAN RX pipeline. Default can_rx_buffer_size=16 gives a TWAI driver
+// queue of 8 + an OpenMRN rxBuf of 16 (~24 frames). A multi-frame CDI write can
+// overrun that mid-datagram while loop() is busy; rx_task then silently drops one
+// frame and the sequence-number-less DatagramCan reassembler completes a SHORT
+// datagram (no NACK) -> truncated config write. 64 -> ~96 frames, ~1.5KB RAM.
+OVERRIDE_CONST(can_rx_buffer_size, 64);
+OVERRIDE_CONST(can_tx_buffer_size, 32);
 
 /// Node ID — MERG member 7752 (0x001E48), node #2: 03.04.00.1E.48.02.
 static constexpr uint64_t NODE_ID = UINT64_C(0x0304001E4802);
@@ -446,6 +456,7 @@ static void enable_wifi()
     wm.setConfigPortalTimeout(180);
     if (wm.autoConnect("LCC-Out-Setup"))
     {
+        MDNS.begin("lcc-out-node");   // resolvable at lcc-out-node.local for OTA-by-name
         ArduinoOTA.setHostname("lcc-out-node");
         ArduinoOTA.onStart([]() { s_ota_in_progress = true;  });
         ArduinoOTA.onEnd  ([]() { s_ota_in_progress = false; });

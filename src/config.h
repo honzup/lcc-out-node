@@ -8,7 +8,7 @@
 // Each output channel carries:
 //   - a PIN dropdown (which board GPIO this channel drives; None = disabled,
 //     defaulted at factory reset to None so unconfigured tabs own no pin),
-//   - a 16-char user Description,
+//   - a 32-byte user Description (31 chars),
 //   - an EFFECT dropdown (0=Off, 1=Steady, 2=Random, 3=Flicker),
 //   - an on/off event pair.
 // The 13 channels are a RepeatedGroup so JMRI shows the per-output tabs; the pin
@@ -46,7 +46,8 @@ constexpr uint8_t NUM_OUTPUTS = 13;   // consumers, fixed 1:1 to GPIOs
 /// 0x1824 = factory-reset seeds pin = None (was each channel's natural GPIO), so
 ///          unconfigured tabs own no pin and can't collide. Bump reformats
 ///          existing nodes to the clean all-None state on next boot.
-static constexpr uint16_t CANONICAL_VERSION = 0x1824;
+/// 0x1825 = description widened 16 -> 32 bytes (31 usable chars).
+static constexpr uint16_t CANONICAL_VERSION = 0x1825;
 
 // ---- Pin-selector dropdown (stored value = <property> index; label = GPIO) --
 // The firmware maps these property indices to GPIOs via OUTPUT_PINS[] in
@@ -75,7 +76,7 @@ static constexpr uint16_t CANONICAL_VERSION = 0x1824;
     "<relation><property>2</property><value>Random (building lights)</value></relation>" \
     "<relation><property>3</property><value>Flicker (fire)</value></relation>"
 
-/// One output channel: pin dropdown, 16-char description, effect dropdown, on/off
+/// One output channel: pin dropdown, 32-byte description, effect dropdown, on/off
 /// event pair. The pin is selectable at runtime (see OutputChannel in main.cpp).
 CDI_GROUP(OutputConfig);
 CDI_GROUP_ENTRY(pin, Uint8ConfigEntry, Default(0), //
@@ -83,7 +84,7 @@ CDI_GROUP_ENTRY(pin, Uint8ConfigEntry, Default(0), //
     Description("Which board GPIO this channel drives. None = disabled. "
                 "Defaults to None; pick a GPIO to enable this channel."),
     MapValues(OUTPUT_PIN_MAP));
-CDI_GROUP_ENTRY(description, StringConfigEntry<16>, //
+CDI_GROUP_ENTRY(description, StringConfigEntry<32>, //
     Name("Description"),
     Description("User name of this output."));
 CDI_GROUP_ENTRY(effect, Uint8ConfigEntry, Default(0), //

@@ -22,8 +22,8 @@
 #include "openlcb/ConfigRepresentation.hxx"
 #include "openlcb/MemoryConfig.hxx"
 
-#if !defined(USE_CAN) && !defined(USE_WIFI)
-#error "Invalid configuration detected, USE_CAN or USE_WIFI must be defined."
+#if !defined(USE_TWAI) && !defined(USE_WIFI)
+#error "Invalid configuration detected, USE_TWAI or USE_WIFI must be defined."
 #endif
 
 namespace openlcb

@@ -4,7 +4,7 @@
  * OpenMRNLite "13-output effects" LCC node — fleet node #2.
  * Cloned from the sibling lcc-8out-40action-node OpenMRNLite port (proven robust
  * over the ESP32-P4 GridConnect-TCP bridge). Carried over VERBATIM:
- *   - the CAN setup (Esp32HardwareCan, GPIO4=RX / GPIO5=TX -> SN65HVD230, 125 kbit/s),
+ *   - the CAN setup (Esp32HardwareTwai, GPIO4=RX / GPIO5=TX -> SN65HVD230, 125 kbit/s),
  *   - SPIFFS config storage,
  *   - the fsync-on-write persistence fix (SyncedFileMemorySpace + debounced fsync),
  *   - the WiFi-OTA-gated-by-LCC-events feature + SNIP.
@@ -17,7 +17,7 @@
  *   - A non-blocking millis()-based effect engine drives the pins; the on/off
  *     events set a commanded state rather than writing the GPIO directly.
  *
- * OpenMRNLite v2.0.0 API (Esp32HardwareCan). CAN fixed at 125 kbit/s.
+ * OpenMRNLite v2.0.0 API (Esp32HardwareTwai, select() mode). CAN fixed at 125 kbit/s.
  */
 
 #include <Arduino.h>
@@ -32,16 +32,18 @@
 #include "openlcb/CallbackEventHandler.hxx"
 #include "utils/constants.hxx"                 // OVERRIDE_CONST — deepen CAN RX buffer
 
-#define USE_CAN   // CAN-only node for LCC (WiFi is OTA-only, event-gated)
+#define USE_TWAI  // CAN-only node for LCC, native TWAI driver (WiFi is OTA-only, event-gated)
 
 #include "config.h"
 
-// Deepen the CAN RX pipeline. Default can_rx_buffer_size=16 gives a TWAI driver
-// queue of 8 + an OpenMRN rxBuf of 16 (~24 frames). A multi-frame CDI write can
-// overrun that mid-datagram while loop() is busy; rx_task then silently drops one
-// frame and the sequence-number-less DatagramCan reassembler completes a SHORT
-// datagram (no NACK) -> truncated config write. 64 -> ~96 frames, ~1.5KB RAM.
-OVERRIDE_CONST(can_rx_buffer_size, 64);
+// Deepen the CAN RX pipeline. With Esp32HardwareTwai this is the ONLY RX buffer
+// (ISR -> executor via select()); the old Esp32HardwareCan split it into an IDF
+// queue (size/2) + OpenMRN rxBuf, ~96 frames at 64. A multi-frame CDI write that
+// overruns it mid-datagram loses a frame and the sequence-number-less
+// DatagramCan reassembler completes a SHORT datagram (no NACK) -> truncated
+// config write. 128 keeps >= the old headroom (~1KB RAM). Overruns now show in
+// the driver's periodic "ESP-TWAI" stats log (rx_missed / rx_overrun).
+OVERRIDE_CONST(can_rx_buffer_size, 128);
 OVERRIDE_CONST(can_tx_buffer_size, 32);
 
 /// Node ID — MERG member 7752 (0x001E48), node #2: 03.04.00.1E.48.02.
@@ -52,6 +54,11 @@ constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_4;
 constexpr gpio_num_t CAN_TX_PIN = GPIO_NUM_5;
 
 OpenMRN openmrn(NODE_ID);
+
+/// Native TWAI driver (replaces the deprecated Esp32HardwareCan adapter).
+/// Periodic stats reporting on (default). Also a prerequisite for the
+/// OpenMRNLite LCC firmware-update bootloader.
+Esp32HardwareTwai twai(CAN_RX_PIN, CAN_TX_PIN);
 
 // Workaround for a GCC/ESP32 empty-string static-init bug.
 string dummystring("abcdef");
@@ -508,11 +515,9 @@ void setup()
         cfg.seg().internal_config(),
         openlcb::CANONICAL_VERSION, openlcb::CONFIG_FILE_SIZE);
 
-    // OpenMRNLite v2.0.0: (name, RX pin, TX pin). Bitrate fixed at 125 kbit/s.
-    openmrn.add_can_port(
-        new Esp32HardwareCan("esp32can", CAN_RX_PIN, CAN_TX_PIN));
-
+    twai.hw_init();
     openmrn.begin();
+    openmrn.add_can_port_select("/dev/twai/twai0");
     // Override the default SPACE_CONFIG memory space with one that fsyncs after
     // writes (see SyncedFileMemorySpace above). registry insert is a map assign,
     // so this replaces the FileMemorySpace the stack registered in begin().

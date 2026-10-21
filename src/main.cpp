@@ -1,23 +1,41 @@
 /** \copyright
- * Copyright (c) 2019, Mike Dunston — BSD-3 (see OpenMRNLite ESP32/IOBoard example).
+ * Copyright (c) 2019, Mike Dunston
+ * Copyright (c) 2026, John Holmes
+ * All rights reserved.
  *
- * OpenMRNLite "13-output effects" LCC node — fleet node #2.
- * Cloned from the sibling lcc-8out-40action-node OpenMRNLite port (proven robust
- * over the ESP32-P4 GridConnect-TCP bridge). Carried over VERBATIM:
- *   - the CAN setup (Esp32HardwareTwai, GPIO4=RX / GPIO5=TX -> SN65HVD230, 125 kbit/s),
- *   - SPIFFS config storage,
- *   - the fsync-on-write persistence fix (SyncedFileMemorySpace + debounced fsync),
- *   - the WiFi-OTA-gated-by-LCC-events feature + SNIP.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are  permitted provided that the following conditions are met:
  *
- * DIFFERENT from node #1:
- *   - Node ID 03.04.00.1E.48.02.
- *   - OUTPUTS ONLY: 13 outputs, no inputs/producers.
- *   - Each output is FIXED 1:1 to a GPIO (no pin dropdown).
- *   - Per-output EFFECT: 0=Off, 1=Steady, 2=Random, 3=Flicker(fire).
- *   - A non-blocking millis()-based effect engine drives the pins; the on/off
- *     events set a commanded state rather than writing the GPIO directly.
+ *  - Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
  *
- * OpenMRNLite v2.0.0 API (Esp32HardwareTwai, select() mode). CAN fixed at 125 kbit/s.
+ *  - Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Based on the ESP32IOBoard example from OpenMRNLite by Mike Dunston.
+ *
+ * OpenMRNLite 13-output "effects" LCC node for a classic ESP32 DevKit:
+ *   - CAN: Esp32HardwareTwai, GPIO4 = RX / GPIO5 = TX to a 3.3 V CAN
+ *     transceiver, 125 kbit/s.
+ *   - 13 output channels; each picks its GPIO from a dropdown in the CDI.
+ *   - Per-output EFFECT: 0=Off, 1=Steady, 2=Random, 3=Flicker(fire), driven by
+ *     a non-blocking millis()-based engine; the on/off events set a commanded
+ *     state rather than writing the GPIO directly.
+ *   - SPIFFS config storage with fsync-on-write, so JMRI edits survive a reset.
+ *   - WiFi is OFF normally; LCC events switch it on for OTA updates.
  */
 
 #include <Arduino.h>
@@ -46,10 +64,14 @@
 OVERRIDE_CONST(can_rx_buffer_size, 128);
 OVERRIDE_CONST(can_tx_buffer_size, 32);
 
-/// Node ID — MERG member 7752 (0x001E48), node #2: 03.04.00.1E.48.02.
+// ===================== SET THIS FOR YOUR LAYOUT =====================
+/// Node ID -- must be unique on your LCC network. Use an ID from your own
+/// range (MERG members: 03.04.00.<membership number in hex>.<nn>; otherwise
+/// request a free range from OpenLCB). This one is the author's.
 static constexpr uint64_t NODE_ID = UINT64_C(0x0304001E4802);
+// ====================================================================
 
-/// CAN pins -> SN65HVD230:  GPIO4 = RX (from R),  GPIO5 = TX (to D).
+/// CAN pins -> 3.3 V transceiver:  GPIO4 = RX (from RXD),  GPIO5 = TX (to TXD).
 constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_4;
 constexpr gpio_num_t CAN_TX_PIN = GPIO_NUM_5;
 
@@ -123,7 +145,7 @@ static void free_ledc(int ch)
 
 /// One output channel: a config-driven consumer whose on/off events set a
 /// commanded state; a non-blocking effect engine (update()) drives the SELECTED
-/// GPIO. Mirrors node #1's GPIOBit+BitEventConsumer + DynamicGpio retarget, but
+/// GPIO. Mirrors OpenMRN's GPIOBit+BitEventConsumer + DynamicGpio retarget, but
 /// the Gpio it feeds is a CmdGpio that toggles commanded_ instead of writing the
 /// pin — the effect engine does the physical writes on the loop thread.
 class OutputChannel : public DefaultConfigUpdateListener
@@ -253,7 +275,7 @@ private:
 
     /// Retarget this channel to a (possibly new) GPIO and apply its effect. On a
     /// pin change we release the OLD pin cleanly first (free its LEDC / drive LOW),
-    /// then set_effect() sets up the new pin — node #1's DynamicGpio::configure
+    /// then set_effect() sets up the new pin — the DynamicGpio::configure
     /// retarget, extended for the LEDC-backed Flicker effect.
     void retarget(int new_pin, uint8_t eff)
     {
@@ -411,7 +433,7 @@ public:
 };
 
 // ===================== WiFi-over-LCC control (OTA only) =====================
-// Ported from node #1. WiFi is OFF at boot. JMRI switches it on/off by PRODUCING
+// WiFi is OFF at boot. JMRI switches it on/off by PRODUCING
 // these events (bind a sensor/turnout/button); the node CONSUMES them. Flip ON to
 // flash over WiFi, flip OFF when done — so LCC/CAN never depends on WiFi.
 //   WiFi ON  : 03.04.00.1E.48.02.FE.00
@@ -455,7 +477,7 @@ static void enable_wifi()
 {
     digitalWrite(WIFI_LED_PIN, HIGH);               // lit while connecting/up
     WiFi.mode(WIFI_STA);
-    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);      // 3 UniFi APs on one SSID:
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);      // several APs on one SSID:
     WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);  // pick the strongest, not the first
     WiFi.setSleep(false);
     // autoConnect: saved creds if provisioned, else raises AP "LCC-Out-Setup".

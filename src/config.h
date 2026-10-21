@@ -1,9 +1,9 @@
 #ifndef _LCC_OUT_OMRN_CONFIG_H_
 #define _LCC_OUT_OMRN_CONFIG_H_
 
-// OpenMRNLite CDI for the 13-output "effects" LCC node (fleet node #2).
-// Derived from the sibling lcc-8out-40action-node (BSD-3, (c) 2019 Mike Dunston
-// upstream). This node is OUTPUTS ONLY — no inputs/producers.
+// OpenMRNLite CDI for the 13-output "effects" LCC node.
+// Based on the OpenMRNLite ESP32IOBoard example ((c) 2019 Mike Dunston,
+// BSD 2-clause - see LICENSE). This node is OUTPUTS ONLY - no inputs/producers.
 //
 // Each output channel carries:
 //   - a PIN dropdown (which board GPIO this channel drives; None = disabled,
@@ -12,7 +12,7 @@
 //   - an EFFECT dropdown (0=Off, 1=Steady, 2=Random, 3=Flicker),
 //   - an on/off event pair.
 // The 13 channels are a RepeatedGroup so JMRI shows the per-output tabs; the pin
-// is a selectable field inside each tab (like node #1's lcc-8out-40action-node).
+// is a selectable field inside each tab .
 // The firmware reads the selected pin at config-load, retargets its DynamicGpio-
 // style effect engine to that GPIO, and routes the on/off events into the
 // channel's commanded state (see OutputChannel in main.cpp) rather than a direct

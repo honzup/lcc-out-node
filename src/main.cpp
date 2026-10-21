@@ -1,6 +1,6 @@
 /** \copyright
  * Copyright (c) 2019, Mike Dunston
- * Copyright (c) 2026, John Holmes
+ * Copyright (c) 2026, John Bell
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without

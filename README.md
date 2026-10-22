@@ -65,6 +65,46 @@ code – it removes the `Esp32HardwareTwai` CAN driver used here.
 5. **Control it from JMRI** with the output's On and Off events – for example a
    JMRI OpenLCB **Light** or **Turnout** using those two events, or from LogixNG.
 
+### Building with the Arduino IDE instead
+
+The project is set up for PlatformIO, but builds in the Arduino IDE (or
+arduino-cli) too. The versions matter – **OpenMRNLite 2.0.0 needs the ESP32
+core 2.0.x**; OpenMRNLite 2.2.x needs core 3.x and won't build this sketch.
+
+1. **Boards Manager:** install **esp32 by Espressif, version 2.0.17** (not 3.x).
+2. **Library Manager:** install **OpenMRNLite, version 2.0.0** (pick it from the
+   version dropdown) and **WiFiManager by tzapu**. If 2.0.0 isn't offered,
+   download the zip from the
+   [OpenMRNLite v2.0.0 release](https://github.com/openmrn/OpenMRNLite/releases/tag/v2.0.0)
+   and use *Sketch → Include Library → Add .ZIP Library*.
+   The IDE has one shared libraries folder, so this sets OpenMRNLite 2.0.0 for
+   **every** sketch – one reason I use PlatformIO, which keeps a copy per project.
+3. **Switch the compiler to C++17.** The code needs it (PlatformIO sets it in
+   `platformio.ini`), but core 2.0.17 compiles with C++11 and fails with
+   "use of deleted function" errors. Create a file called `platform.local.txt`
+   next to the core's `platform.txt` – on Linux
+   `~/.arduino15/packages/esp32/hardware/esp32/2.0.17/`, on Windows
+   `%LOCALAPPDATA%\Arduino15\packages\esp32\hardware\esp32\2.0.17\`, on macOS
+   `~/Library/Arduino15/packages/esp32/hardware/esp32/2.0.17/` – containing
+   this one line, then restart the IDE:
+   ```
+   compiler.cpp.extra_flags=-std=gnu++17
+   ```
+   This applies to every sketch built with that core version.
+4. **Make a sketch folder:** create a folder called `lcc-out-node`, copy
+   `src/main.cpp` into it renamed to **`lcc-out-node.ino`**, and copy
+   **`src/config.h`** next to it.
+5. **Tools menu:** Board **ESP32 Dev Module**, Partition Scheme
+   **Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)**.
+6. Upload. With arduino-cli you can pass the C++17 flag instead of step 3:
+   ```bash
+   arduino-cli compile -u -p /dev/ttyUSB0 \
+     --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
+     --build-property "compiler.cpp.extra_flags=-std=gnu++17" lcc-out-node
+   ```
+
+Tested with arduino-cli: esp32 core 2.0.17, OpenMRNLite 2.0.0, WiFiManager 2.0.17.
+
 ## WiFi and OTA updates
 
 WiFi is **off** in normal running, so the CAN side never depends on it. Two

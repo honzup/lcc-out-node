@@ -134,8 +134,8 @@ you've finished.
 
 - If you change the configuration layout in `src/config.h`, bump
   `CANONICAL_VERSION`. The stored configuration is then reset to defaults
-  instead of being read against the wrong layout. Restart JMRI afterwards too,
-  as it caches each node's CDI.
+  instead of being read against the wrong layout. JMRI caches each node's CDI,
+  so afterwards use **Clear CDI Cache** in LccPro (or restart JMRI).
 - The CAN receive buffer is enlarged (`can_rx_buffer_size` 128) so long
   configuration writes from JMRI aren't truncated.
 
